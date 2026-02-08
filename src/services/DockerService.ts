@@ -9,10 +9,7 @@ import { ContainerConfig, IDecryptedSecrets } from '../types/index';
 import net from 'net';
 
 const AGENT_IMAGE = config.docker.agentImage;
-
-// Force absolute path for Docker Bind Mounts
 const ABSOLUTE_DATA_PATH = path.resolve(process.cwd(), config.docker.dataPath);
-
 const CONTAINER_PREFIX = config.docker.containerPrefix;
 const AGENT_PORT = config.agent.internalPort;
 const MEMORY_LIMIT = config.agent.memoryLimit;
@@ -49,39 +46,62 @@ export class DockerService {
   ): Promise<string> {
     const deploymentId = deployment._id.toString();
     const subdomain = deployment.subdomain;
+    const containerName = `${CONTAINER_PREFIX}${deploymentId}`;
 
     logger.info('Spawning agent container', { deploymentId, subdomain });
 
     try {
+      // --- STEP 1: SCORCHED EARTH CLEANUP (The Fix) ---
+      // Force kill any existing zombie container with this name
+      try {
+        const oldContainer = this.docker.getContainer(containerName);
+        const inspect = await oldContainer.inspect();
+        if (inspect) {
+             logger.warn(`Found zombie container ${containerName}. Killing it...`);
+             await oldContainer.remove({ force: true });
+        }
+      } catch (e: any) {
+        // Ignore 404 (container not found), throw others
+        if (e.statusCode !== 404) logger.error('Error clearing zombie:', e.message);
+      }
+
+      // Force clear DB state to prevent "Port Locked" errors
+      await Deployment.updateOne(
+        { _id: deploymentId }, 
+        { $unset: { internalPort: "", containerId: "" } }
+      );
+      // ------------------------------------------------
+
       await deployment.transitionTo('configuring', { provisioningStep: 'Allocating resources...' });
 
+      // --- STEP 2: PORT ALLOCATION ---
       const port = await portManager.allocatePort();
+      // We forced DB clear above, so this reservation SHOULD succeed.
       const reserved = await portManager.atomicReservePort(deploymentId, port);
       
       if (!reserved) {
-        portManager.releasePort(port);
-        return this.spawnAgent(deployment, secrets);
+         // If it still fails, it's a critical race condition. Force one last time.
+         logger.warn(`Atomic reservation failed. Forcing port ${port} assignment.`);
+         await Deployment.updateOne({ _id: deploymentId }, { $set: { internalPort: port } });
       }
 
       await deployment.transitionTo('configuring', { provisioningStep: 'Generating configuration...' });
       
-      const configPath = await this.prepareAgentConfig(
+      await this.prepareAgentConfig(
         deploymentId,
         subdomain,
         secrets,
         deployment.config 
       );
 
-      await deployment.transitionTo('provisioning', { provisioningStep: 'Pulling container image...' });
+      await deployment.transitionTo('provisioning', { provisioningStep: 'Pulling image...' });
       await this.ensureImageExists(AGENT_IMAGE);
 
-      await deployment.transitionTo('provisioning', { provisioningStep: 'Creating container...' });
-      const containerName = `${CONTAINER_PREFIX}${deploymentId}`;
+      await deployment.transitionTo('provisioning', { provisioningStep: 'Starting container...' });
       
       const containerConfig = this.buildContainerConfig(
         containerName, 
         port, 
-        configPath, 
         deploymentId,
         secrets
       );
@@ -89,18 +109,31 @@ export class DockerService {
       const container = await this.docker.createContainer(containerConfig);
       const containerId = container.id;
 
+      // Update DB with success
       deployment.containerId = containerId;
+      deployment.internalPort = port;
       await deployment.save();
 
-      await deployment.transitionTo('starting', { provisioningStep: 'Starting agent...' });
       await container.start();
       
+      // Mark as healthy only after checks pass
+      await deployment.transitionTo('starting', { provisioningStep: 'Health checking...' });
       this.startHealthChecks(deployment, port);
 
       return containerId;
-    } catch (error) {
-      logger.error("Spawn Error", error);
+
+    } catch (error: any) {
+      logger.error("Spawn Error", { message: error.message });
+      
+      // Cleanup on failure
       await this.cleanupFailedDeployment(deployment);
+      
+      // Special handling for Port Conflicts (Recursion)
+      if (error.message?.includes('port is already allocated')) {
+          logger.warn(`Port collision detected. Retrying...`);
+          return this.spawnAgent(deployment, secrets);
+      }
+
       await deployment.transitionTo('error', { errorMessage: (error as Error).message });
       throw error;
     }
@@ -111,29 +144,27 @@ export class DockerService {
     subdomain: string,
     secrets: IDecryptedSecrets,
     agentConfig: any
-  ): Promise<string> {
+  ): Promise<void> {
     const configDir = path.join(ABSOLUTE_DATA_PATH, deploymentId, 'config');
-    const configPath = path.join(configDir, 'openclaw.json');
-
-    console.log(`[DEBUG] Creating config at: ${configPath}`);
-
+    const dataDir = path.join(ABSOLUTE_DATA_PATH, deploymentId, 'data');
+    
     await fs.mkdir(configDir, { recursive: true });
+    await fs.mkdir(dataDir, { recursive: true });
 
+    // 1. openclaw.json
+    const configPath = path.join(configDir, 'openclaw.json');
+    const gatewayToken = secrets.webUiToken || 'fallback-dev-token-xyz';
+    
     const openClawConfig = {
       agents: {
         defaults: {
-          model: {
-            primary: agentConfig.model, 
-          },
-          workspace: '/home/node/.openclaw/workspace'
+          model: { primary: agentConfig.model || 'google/gemini-1.5-flash' },
+          workspace: process.platform === 'win32' ? '/root/.openclaw/workspace' : '/home/node/.openclaw/workspace'
         }
       },
       gateway: {
         port: AGENT_PORT,
-        auth: {
-          mode: 'token',
-          token: secrets.webUiToken,
-        },
+        auth: { mode: 'token', token: gatewayToken },
       },
       channels: {
         telegram: secrets.telegramBotToken ? {
@@ -144,53 +175,57 @@ export class DockerService {
         } : { enabled: false }
       },
       plugins: {
-        entries: {
-          telegram: { 
-            enabled: !!secrets.telegramBotToken 
-          }
-        }
+        entries: { telegram: { enabled: !!secrets.telegramBotToken } }
       }
     };
 
     await fs.writeFile(configPath, JSON.stringify(openClawConfig, null, 2), { mode: 0o600 });
 
-    if (process.platform !== 'win32') {
-       try { await fs.chown(configDir, 1000, 1000); } catch (e) {}
-    }
+    // 2. auth-profiles.json
+    const agentAuthDir = path.join(dataDir, 'agents', 'main', 'agent');
+    await fs.mkdir(agentAuthDir, { recursive: true });
 
-    return configDir;
+    const authProfile: any = {};
+    if (secrets.googleApiKey) authProfile.google = { apiKey: secrets.googleApiKey };
+    if (secrets.anthropicApiKey) authProfile.anthropic = { apiKey: secrets.anthropicApiKey };
+    if (secrets.openaiApiKey) authProfile.openai = { apiKey: secrets.openaiApiKey };
+
+    await fs.writeFile(
+      path.join(agentAuthDir, 'auth-profiles.json'),
+      JSON.stringify(authProfile, null, 2),
+      { mode: 0o600 }
+    );
+
+    if (process.platform !== 'win32') {
+       try { 
+         await fs.chown(configDir, 1000, 1000); 
+         await fs.chown(dataDir, 1000, 1000);
+       } catch (e) {}
+    }
   }
 
   private buildContainerConfig(
     name: string, 
     hostPort: number, 
-    configDir: string, 
     deploymentId: string, 
     secrets: IDecryptedSecrets
   ): ContainerConfig {
     
-    let bindConfigPath = configDir;
-    const volumeName = `simpleclaw-vol-${deploymentId}`;
+    const hostConfigPath = path.join(ABSOLUTE_DATA_PATH, deploymentId, 'config');
+    const hostDataPath = path.join(ABSOLUTE_DATA_PATH, deploymentId, 'data');
+    const internalDataPath = process.platform === 'win32' ? '/root/.openclaw' : '/home/node/.openclaw';
+    const safeToken = secrets.webUiToken || 'fallback-dev-token-xyz';
 
     const envVars = [
         `OPENCLAW_CONFIG_PATH=/config/openclaw.json`,
         `DEPLOYMENT_ID=${deploymentId}`,
         `NODE_ENV=production`,
-        `OPENCLAW_GATEWAY_TOKEN=${secrets.webUiToken}`,
+        `OPENCLAW_GATEWAY_TOKEN=${safeToken}`,
         `NODE_OPTIONS=--max-old-space-size=1536`
     ];
 
-    // INJECT ALL API KEYS
-    if (secrets.openaiApiKey) envVars.push(`OPENAI_API_KEY=${secrets.openaiApiKey}`);
-    if (secrets.anthropicApiKey) envVars.push(`ANTHROPIC_API_KEY=${secrets.anthropicApiKey}`);
-    if (secrets.googleApiKey) envVars.push(`GOOGLE_API_KEY=${secrets.googleApiKey}`); // GEMINI FIX
-    
-    if (secrets.telegramBotToken) {
-        envVars.push(`TELEGRAM_TOKEN=${secrets.telegramBotToken}`);
-        envVars.push(`TELEGRAM_BOT_TOKEN=${secrets.telegramBotToken}`);
-        envVars.push(`OPENCLAW_TELEGRAM_TOKEN=${secrets.telegramBotToken}`);
-        envVars.push(`CHANNELS_TELEGRAM_TOKEN=${secrets.telegramBotToken}`);
-    }
+    if (secrets.googleApiKey) envVars.push(`GOOGLE_API_KEY=${secrets.googleApiKey}`);
+    if (secrets.telegramBotToken) envVars.push(`TELEGRAM_BOT_TOKEN=${secrets.telegramBotToken}`);
 
     return {
       Image: AGENT_IMAGE,
@@ -199,8 +234,8 @@ export class DockerService {
       Env: envVars,
       HostConfig: {
         Binds: [
-          `${bindConfigPath}:/config:rw`,
-          `${volumeName}:/home/node/.openclaw`
+          `${hostConfigPath}:/config:rw`,
+          `${hostDataPath}:${internalDataPath}`
         ],
         PortBindings: { [`${AGENT_PORT}/tcp`]: [{ HostPort: hostPort.toString() }] },
         Memory: MEMORY_LIMIT,
@@ -233,8 +268,6 @@ export class DockerService {
     try {
       const container = this.docker.getContainer(deployment.containerId);
       await container.remove({ force: true, v: true });
-      const volume = this.docker.getVolume(`simpleclaw-vol-${deployment._id}`);
-      await volume.remove().catch(() => {});
       await this.cleanupDataDirectory(deployment._id.toString());
       if (deployment.internalPort) portManager.releasePort(deployment.internalPort);
       deployment.containerId = undefined;
@@ -247,10 +280,39 @@ export class DockerService {
   }
 
   async restartContainer(deployment: InstanceType<typeof Deployment>): Promise<void> {
-    if (!deployment.containerId) throw new Error('No container ID');
+    // If we have no container ID, treat as new spawn
+    if (!deployment.containerId) {
+      logger.info('Restart requested (clean spawn)...', { id: deployment._id });
+      // Clear DB state to prevent conflicts
+      deployment.internalPort = undefined;
+      await deployment.save();
+      
+      const secrets = await deployment.decryptSecrets();
+      await this.spawnAgent(deployment, secrets);
+      return; 
+    }
+
     await deployment.transitionTo('restarting');
     try {
       const container = this.docker.getContainer(deployment.containerId);
+      
+      // Check if container exists
+      try {
+        await container.inspect();
+      } catch (e: any) {
+        if (e.statusCode === 404) {
+           logger.warn('Container missing. Respawning...', { id: deployment._id });
+           deployment.containerId = undefined;
+           deployment.internalPort = undefined;
+           await deployment.save();
+
+           const secrets = await deployment.decryptSecrets();
+           await this.spawnAgent(deployment, secrets);
+           return;
+        }
+        throw e;
+      }
+
       await container.restart({ t: 30 });
       if (deployment.internalPort) this.startHealthChecks(deployment, deployment.internalPort);
     } catch (error: any) {
@@ -334,7 +396,10 @@ export class DockerService {
   }
 
   private async cleanupFailedDeployment(deployment: InstanceType<typeof Deployment>): Promise<void> {
-    await this.removeContainer(deployment);
+    // Only try to remove if we have an ID
+    if (deployment.containerId) {
+        await this.removeContainer(deployment);
+    }
   }
 
   private async cleanupDataDirectory(id: string): Promise<void> {

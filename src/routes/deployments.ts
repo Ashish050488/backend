@@ -91,11 +91,13 @@ router.post(
   '/',
   authenticateToken,
   validateBody(createDeploymentSchema),
+  
   async (req: any, res, next) => {
     try {
       const userId = req.user!.id;
       // EXTRACT Gemini/Google API Key
       const { name, model, openaiApiKey, anthropicApiKey, googleApiKey, telegramBotToken } = req.body;
+      let selectedModel = model;
 
       const user = await User.findById(userId);
       if (!user) {
@@ -170,55 +172,106 @@ router.post(
 // GET /api/deployments/:id - Get deployment details
 // ============================================================================
 
-router.get(
-  '/:id',
+// backend/src/routes/deployments.ts
+
+router.post(
+  '/',
   authenticateToken,
-  validateParams(deploymentParamsSchema),
+  validateBody(createDeploymentSchema),
   async (req: any, res, next) => {
     try {
       const userId = req.user!.id;
-      const { id } = req.params;
+      // EXTRACT all keys including googleApiKey
+      const { name, model, openaiApiKey, anthropicApiKey, googleApiKey, telegramBotToken } = req.body;
 
-      const deployment = await Deployment.findOne({
-        _id: id,
+      const user = await User.findById(userId);
+      if (!user) {
+        return res.status(404).json({ success: false, error: { code: 'USER_NOT_FOUND', message: 'User not found' } });
+      }
+
+      const canCreate = await user.canCreateAgent();
+      if (!canCreate.allowed) {
+        return res.status(403).json({ success: false, error: { code: 'AGENT_LIMIT_REACHED', message: canCreate.reason } });
+      }
+
+      const existing = await Deployment.findOne({ subdomain: name.toLowerCase() });
+      if (existing) {
+        return res.status(409).json({ success: false, error: { code: 'SUBDOMAIN_TAKEN', message: 'Name taken' } });
+      }
+
+      // --- SMART MODEL DETECTION LOGIC START ---
+      let selectedModel = model;
+
+      // 1. Smart Fallback: If no model selected, pick based on available key
+      if (!selectedModel) {
+        if (googleApiKey) selectedModel = 'google/gemini-1.5-flash';
+        else if (anthropicApiKey) selectedModel = 'anthropic/claude-3-5-sonnet';
+        else if (openaiApiKey) selectedModel = 'openai/gpt-4o';
+      }
+
+      // 2. Safety Check: Ensure the model matches the key provided
+      if (selectedModel?.startsWith('google') && !googleApiKey) {
+         return res.status(400).json({ success: false, error: { code: 'MISCONFIG', message: 'Selected Gemini but missing Google API Key' } });
+      }
+      if (selectedModel?.startsWith('anthropic') && !anthropicApiKey) {
+         return res.status(400).json({ success: false, error: { code: 'MISCONFIG', message: 'Selected Claude but missing Anthropic API Key' } });
+      }
+      if (selectedModel?.startsWith('openai') && !openaiApiKey) {
+         return res.status(400).json({ success: false, error: { code: 'MISCONFIG', message: 'Selected OpenAI but missing OpenAI API Key' } });
+      }
+
+      // 3. Final Fallback (should be caught by validation, but safe to keep)
+      if (!selectedModel) {
+         return res.status(400).json({ success: false, error: { code: 'MODEL_REQUIRED', message: 'Could not determine model from inputs' } });
+      }
+      // --- SMART MODEL DETECTION LOGIC END ---
+
+      // Global Key Check
+      if (!openaiApiKey && !anthropicApiKey && !googleApiKey) {
+        return res.status(400).json({ success: false, error: { code: 'API_KEY_REQUIRED', message: 'Provide at least one API key.' } });
+      }
+
+      const webUiToken = cryptoService.generateToken(32);
+
+      const deployment = new Deployment({
         user: userId,
+        subdomain: name.toLowerCase(),
+        status: 'idle',
+        secrets: {
+          openaiApiKey: openaiApiKey || undefined,
+          anthropicApiKey: anthropicApiKey || undefined,
+          googleApiKey: googleApiKey || undefined, // <--- CRITICAL: Save Google Key
+          telegramBotToken: telegramBotToken || undefined,
+          webUiToken,
+        },
+        config: {
+          model: selectedModel, // <--- CRITICAL: Use the smart detected model
+          systemPrompt: 'You are a helpful AI assistant.'
+        },
       });
 
-      if (!deployment) {
-        res.status(404).json({
-          success: false,
-          error: {
-            code: 'DEPLOYMENT_NOT_FOUND',
-            message: 'Deployment not found',
-          },
-        } as ApiResponse);
-        return;
-      }
+      await deployment.save();
 
-      // Get auto-login URL if healthy
-      let autoLoginUrl: string | undefined;
-      if (deployment.status === 'healthy') {
-        autoLoginUrl = await deployment.getAutoLoginUrl();
-      }
+      setImmediate(async () => {
+        try {
+          const secrets = await deployment.decryptSecrets();
+          await dockerService.spawnAgent(deployment, secrets);
+        } catch (error) {
+          logger.error('Async spawn failed', { error: (error as Error).message });
+          // If spawn fails immediately, mark as error so user isn't stuck in "starting"
+          await deployment.transitionTo('error', { errorMessage: (error as Error).message });
+        }
+      });
 
-      res.json({
+      res.status(201).json({
         success: true,
         data: {
-          id: deployment._id.toString(), // FIX: Convert to string
+          id: deployment._id.toString(),
           subdomain: deployment.subdomain,
           status: deployment.status as any,
-          url: deployment.status === 'healthy' 
-            ? deployment.getUrl() 
-            : undefined,
-          autoLoginUrl,
-          provisioningStep: deployment.provisioningStep,
-          errorMessage: deployment.errorMessage,
           createdAt: deployment.createdAt.toISOString(),
-          updatedAt: deployment.updatedAt.toISOString(),
-          lastHeartbeat: deployment.lastHeartbeat?.toISOString(),
-          config: deployment.config,
         },
-      } as ApiResponse);
+      } as ApiResponse<DeploymentStatusResponse>);
 
     } catch (error) {
       next(error);

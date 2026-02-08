@@ -62,28 +62,41 @@ app.use(errorHandler);
 server.on('upgrade', handleWebSocketUpgrade);
 
 // --- SERVER STARTUP ---
-async function startServer(): Promise<void> {
-  try {
-    logger.info('Connecting to database...');
-    await connectDatabase();
-    logger.info('Database connected');
+const RETRY_DELAY = 5000;
+const MAX_RETRIES = 5;
 
-    // --- 2. START THE REAPER HERE ---
-    // This cleans up dead containers every minute
-    reaperService.start(); 
+async function startServerWithRetry(retries = MAX_RETRIES): Promise<void> {
+  try {
+    logger.info(`Connecting to database... (Attempts left: ${retries})`);
+    await connectDatabase();
+    logger.info('Database connected successfully.');
+
+    // Start Reaper only after DB is connected
+    reaperService.start();
     logger.info('💀 Reaper Service started');
 
     const PORT = config.server.port;
-    
     server.listen(PORT, () => {
       logger.info(`🚀 Server running on port ${PORT}`);
+      logger.info(`- API: http://${config.server.domain}:${PORT}`);
+      logger.info(`- Environment: ${config.server.env}`);
     });
 
   } catch (error) {
-    logger.error('Failed to start server', { error: (error as Error).message });
-    process.exit(1);
+    logger.error('Failed to start server:', { error: (error as Error).message });
+    
+    if (retries > 0) {
+      logger.warn(`Retrying in ${RETRY_DELAY/1000} seconds...`);
+      setTimeout(() => startServerWithRetry(retries - 1), RETRY_DELAY);
+    } else {
+      logger.error('Max retries reached. Exiting.');
+      process.exit(1);
+    }
   }
 }
+
+// Replace the old startServer() call with:
+startServerWithRetry();
 
 // Graceful Shutdown
 const shutdown = () => {
@@ -93,6 +106,5 @@ const shutdown = () => {
 process.on('SIGTERM', shutdown);
 process.on('SIGINT', shutdown);
 
-startServer();
 
 export default app;

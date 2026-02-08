@@ -32,10 +32,10 @@ const DeploymentSchema = new Schema<IDeploymentDocument>(
       anthropicApiKey: { type: String },
       telegramBotToken: { type: String },
       googleApiKey: { type: String },
-      webUiToken: { type: String, required: true },
+      webUiToken: { type: String, select: false, required: false },
     },
     config: {
-      model: { type: String, default: 'anthropic/claude-3-5-sonnet' },
+      model: { type: String, required: true },
       systemPrompt: { type: String, default: 'You are a helpful AI assistant.' }
     },
     lastHeartbeat: { type: Date },
