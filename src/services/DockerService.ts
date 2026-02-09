@@ -56,15 +56,15 @@ export class DockerService {
         const oldContainer = this.docker.getContainer(containerName);
         const inspect = await oldContainer.inspect();
         if (inspect) {
-             logger.warn(`Found zombie container ${containerName}. Killing it...`);
-             await oldContainer.remove({ force: true });
+          logger.warn(`Found zombie container ${containerName}. Killing it...`);
+          await oldContainer.remove({ force: true });
         }
       } catch (e: any) {
         if (e.statusCode !== 404) logger.error('Error clearing zombie:', e.message);
       }
 
       await Deployment.updateOne(
-        { _id: deploymentId }, 
+        { _id: deploymentId },
         { $unset: { internalPort: "", containerId: "" } }
       );
 
@@ -73,29 +73,29 @@ export class DockerService {
       // 2. Port Allocation
       const port = await portManager.allocatePort();
       const reserved = await portManager.atomicReservePort(deploymentId, port);
-      
+
       if (!reserved) {
-         logger.warn(`Atomic reservation failed. Forcing port ${port} assignment.`);
-         await Deployment.updateOne({ _id: deploymentId }, { $set: { internalPort: port } });
+        logger.warn(`Atomic reservation failed. Forcing port ${port} assignment.`);
+        await Deployment.updateOne({ _id: deploymentId }, { $set: { internalPort: port } });
       }
 
       await deployment.transitionTo('configuring', { provisioningStep: 'Generating configuration...' });
-      
+
       await this.prepareAgentConfig(
         deploymentId,
         subdomain,
         secrets,
-        deployment.config 
+        deployment.config
       );
 
       await deployment.transitionTo('provisioning', { provisioningStep: 'Pulling image...' });
       await this.ensureImageExists(AGENT_IMAGE);
 
       await deployment.transitionTo('provisioning', { provisioningStep: 'Starting container...' });
-      
+
       const containerConfig = this.buildContainerConfig(
-        containerName, 
-        port, 
+        containerName,
+        port,
         deploymentId,
         secrets
       );
@@ -108,7 +108,7 @@ export class DockerService {
       await deployment.save();
 
       await container.start();
-      
+
       await deployment.transitionTo('starting', { provisioningStep: 'Health checking...' });
       this.startHealthChecks(deployment, port);
 
@@ -117,10 +117,10 @@ export class DockerService {
     } catch (error: any) {
       logger.error("Spawn Error", { message: error.message });
       await this.cleanupFailedDeployment(deployment);
-      
+
       if (error.message?.includes('port is already allocated')) {
-          logger.warn(`Port collision detected. Retrying...`);
-          return this.spawnAgent(deployment, secrets);
+        logger.warn(`Port collision detected. Retrying...`);
+        return this.spawnAgent(deployment, secrets);
       }
 
       await deployment.transitionTo('error', { errorMessage: (error as Error).message });
@@ -136,18 +136,27 @@ export class DockerService {
   ): Promise<void> {
     const configDir = path.join(ABSOLUTE_DATA_PATH, deploymentId, 'config');
     const dataDir = path.join(ABSOLUTE_DATA_PATH, deploymentId, 'data');
-    
+    const workspaceDir = path.join(dataDir, 'workspace', 'memory');
+    await fs.mkdir(workspaceDir, { recursive: true });
+
+    // Create initial memory file
+    const today = new Date().toISOString().split('T')[0]; // YYYY-MM-DD
+    const memoryFile = path.join(workspaceDir, `${today}.md`);
+    await fs.writeFile(memoryFile, `# Memory for ${today}\n\n`, { mode: 0o644 });
+
+    logger.info('Created workspace memory structure', { workspaceDir });
+
     await fs.mkdir(configDir, { recursive: true });
     await fs.mkdir(dataDir, { recursive: true });
 
     // --- 1. openclaw.json ---
     const configPath = path.join(configDir, 'openclaw.json');
     const gatewayToken = secrets.webUiToken || 'fallback-dev-token-xyz';
-    
+
     // Use correct Google model names from OpenClaw's pi-ai catalog
     // Available Google models: google/gemini-3-pro-preview, google/gemini-2.0-flash-thinking-exp
     let modelStr = agentConfig.model || 'google/gemini-3-pro-preview';
-    
+
     // Map common user inputs to actual catalog models
     const modelMapping: Record<string, string> = {
       'google/gemini-1.5-flash': 'google/gemini-3-pro-preview',
@@ -155,13 +164,13 @@ export class DockerService {
       'google/gemini-2.0-flash-exp': 'google/gemini-3-pro-preview',
       'google/gemini-flash': 'google/gemini-3-pro-preview',
     };
-    
+
     if (modelMapping[modelStr]) {
       const originalModel = modelStr;
       modelStr = modelMapping[modelStr];
-      logger.info('Mapped model to catalog version', { 
-        from: originalModel, 
-        to: modelStr 
+      logger.info('Mapped model to catalog version', {
+        from: originalModel,
+        to: modelStr
       });
     }
 
@@ -182,7 +191,7 @@ export class DockerService {
           botToken: secrets.telegramBotToken,
           dmPolicy: "open",
           groupPolicy: "open",
-          allowFrom: ["*"] 
+          allowFrom: ["*"]
         } : { enabled: false }
       },
       plugins: {
@@ -198,24 +207,24 @@ export class DockerService {
     // Primary: ~/.openclaw/agents/<agentId>/agent/auth-profiles.json
     // Legacy: ~/.openclaw/agent/auth-profiles.json
     // Root fallback: ~/.openclaw/auth-profiles.json
-    
+
     // Create the agent-specific auth directory
     const agentAuthDir = path.join(dataDir, 'agents', 'main', 'agent');
     await fs.mkdir(agentAuthDir, { recursive: true });
-    
+
     // Build the auth profiles object with proper structure
     const authProfiles: any = {
       profiles: {},
       usageStats: {}
     };
-    
+
     if (secrets.googleApiKey) {
       authProfiles.profiles['google:default'] = {
         type: 'api_key',
         provider: 'google',
         key: secrets.googleApiKey
       };
-      logger.info('Added Google API key to auth profile', { 
+      logger.info('Added Google API key to auth profile', {
         keyLength: secrets.googleApiKey.length,
         keyPrefix: secrets.googleApiKey.substring(0, 10)
       });
@@ -271,16 +280,16 @@ export class DockerService {
 
     // Fix permissions for Linux containers
     if (process.platform !== 'win32') {
-       try { 
-         await fs.chown(configDir, 1000, 1000); 
-         await fs.chown(dataDir, 1000, 1000);
-         await fs.chown(agentAuthDir, 1000, 1000);
-         await fs.chown(authProfilePath, 1000, 1000);
-         await fs.chown(legacyAuthDir, 1000, 1000);
-         await fs.chown(legacyAuthPath, 1000, 1000);
-       } catch (e) {
-         logger.warn('Failed to chown directories', { error: (e as Error).message });
-       }
+      try {
+        await fs.chown(configDir, 1000, 1000);
+        await fs.chown(dataDir, 1000, 1000);
+        await fs.chown(agentAuthDir, 1000, 1000);
+        await fs.chown(authProfilePath, 1000, 1000);
+        await fs.chown(legacyAuthDir, 1000, 1000);
+        await fs.chown(legacyAuthPath, 1000, 1000);
+      } catch (e) {
+        logger.warn('Failed to chown directories', { error: (e as Error).message });
+      }
     }
 
     logger.info('Agent config preparation complete', {
@@ -293,44 +302,44 @@ export class DockerService {
   }
 
   private buildContainerConfig(
-    name: string, 
-    hostPort: number, 
-    deploymentId: string, 
+    name: string,
+    hostPort: number,
+    deploymentId: string,
     secrets: IDecryptedSecrets
   ): ContainerConfig {
-    
+
     const hostConfigPath = path.join(ABSOLUTE_DATA_PATH, deploymentId, 'config');
     const hostDataPath = path.join(ABSOLUTE_DATA_PATH, deploymentId, 'data');
-    
+
     // CRITICAL: Map to /root/.openclaw for the container's internal path
     const internalDataPath = process.platform === 'win32' ? '/root/.openclaw' : '/home/node/.openclaw';
     const safeToken = secrets.webUiToken || 'fallback-dev-token-xyz';
 
     const envVars = [
-        `OPENCLAW_CONFIG_PATH=/config/openclaw.json`,
-        `DEPLOYMENT_ID=${deploymentId}`,
-        `NODE_ENV=production`,
-        `OPENCLAW_GATEWAY_TOKEN=${safeToken}`,
-        `NODE_OPTIONS=--max-old-space-size=1536`
+      `OPENCLAW_CONFIG_PATH=/config/openclaw.json`,
+      `DEPLOYMENT_ID=${deploymentId}`,
+      `NODE_ENV=production`,
+      `OPENCLAW_GATEWAY_TOKEN=${safeToken}`,
+      `NODE_OPTIONS=--max-old-space-size=1536`
     ];
 
     // Add API keys as environment variables (fallback method)
     if (secrets.googleApiKey) {
-        envVars.push(`GOOGLE_API_KEY=${secrets.googleApiKey}`);
-        envVars.push(`GOOGLE_GENAI_API_KEY=${secrets.googleApiKey}`);
-        logger.info('Added Google API key to container env vars');
+      envVars.push(`GOOGLE_API_KEY=${secrets.googleApiKey}`);
+      envVars.push(`GOOGLE_GENAI_API_KEY=${secrets.googleApiKey}`);
+      logger.info('Added Google API key to container env vars');
     }
-    
+
     if (secrets.anthropicApiKey) {
-        envVars.push(`ANTHROPIC_API_KEY=${secrets.anthropicApiKey}`);
+      envVars.push(`ANTHROPIC_API_KEY=${secrets.anthropicApiKey}`);
     }
-    
+
     if (secrets.openaiApiKey) {
-        envVars.push(`OPENAI_API_KEY=${secrets.openaiApiKey}`);
+      envVars.push(`OPENAI_API_KEY=${secrets.openaiApiKey}`);
     }
-    
+
     if (secrets.telegramBotToken) {
-        envVars.push(`TELEGRAM_BOT_TOKEN=${secrets.telegramBotToken}`);
+      envVars.push(`TELEGRAM_BOT_TOKEN=${secrets.telegramBotToken}`);
     }
 
     logger.info('Container config', {
@@ -400,28 +409,28 @@ export class DockerService {
       logger.info('Restart requested (clean spawn)...', { id: deployment._id });
       deployment.internalPort = undefined;
       await deployment.save();
-      
+
       const secrets = await deployment.decryptSecrets();
       await this.spawnAgent(deployment, secrets);
-      return; 
+      return;
     }
 
     await deployment.transitionTo('restarting');
     try {
       const container = this.docker.getContainer(deployment.containerId);
-      
+
       try {
         await container.inspect();
       } catch (e: any) {
         if (e.statusCode === 404) {
-           logger.warn('Container missing. Respawning...', { id: deployment._id });
-           deployment.containerId = undefined;
-           deployment.internalPort = undefined;
-           await deployment.save();
+          logger.warn('Container missing. Respawning...', { id: deployment._id });
+          deployment.containerId = undefined;
+          deployment.internalPort = undefined;
+          await deployment.save();
 
-           const secrets = await deployment.decryptSecrets();
-           await this.spawnAgent(deployment, secrets);
-           return;
+          const secrets = await deployment.decryptSecrets();
+          await this.spawnAgent(deployment, secrets);
+          return;
         }
         throw e;
       }
@@ -452,11 +461,11 @@ export class DockerService {
 
   async getContainerStats(containerId: string): Promise<{ cpu: number; memory: number }> {
     try {
-        const container = this.docker.getContainer(containerId);
-        const stats = await container.stats({ stream: false });
-        return { cpu: 0, memory: 0 }; 
+      const container = this.docker.getContainer(containerId);
+      const stats = await container.stats({ stream: false });
+      return { cpu: 0, memory: 0 };
     } catch (e) {
-        return { cpu: 0, memory: 0 };
+      return { cpu: 0, memory: 0 };
     }
   }
 
@@ -503,14 +512,14 @@ export class DockerService {
       socket.on('error', onError);
       socket.connect(port, '127.0.0.1', () => {
         socket.end();
-        resolve(true); 
+        resolve(true);
       });
     });
   }
 
   private async cleanupFailedDeployment(deployment: InstanceType<typeof Deployment>): Promise<void> {
     if (deployment.containerId) {
-        await this.removeContainer(deployment);
+      await this.removeContainer(deployment);
     }
   }
 
