@@ -1,6 +1,6 @@
 /**
  * Deployment Routes
- * * CRUD operations for agent deployments, lifecycle management,
+ * CRUD operations for agent deployments, lifecycle management,
  * and container operations.
  */
 
@@ -19,7 +19,6 @@ import {
 } from '@middleware/validate';
 import { cryptoService } from '@utils/crypto';
 import { logger } from '@utils/logger';
-// FIX: Import from relative path to avoid alias issues
 import { ApiResponse, DeploymentStatusResponse } from '../types';
 import { proxyManager } from '@middleware/proxy';
 
@@ -40,19 +39,17 @@ router.get(
       const limit = parseInt(req.query.limit as string) || 10;
       const skip = (page - 1) * limit;
 
-      // Get deployments with pagination
       const [deployments, total] = await Promise.all([
         Deployment.find({ user: userId })
           .sort({ createdAt: -1 })
           .skip(skip)
           .limit(limit)
-          .lean(), // lean() returns plain JS objects, _id is usually ObjectId
+          .lean(),
         Deployment.countDocuments({ user: userId }),
       ]);
 
-      // Format response
       const formattedDeployments: DeploymentStatusResponse[] = deployments.map(d => ({
-        id: d._id.toString(), // FIX: Convert ObjectId to string
+        id: d._id.toString(),
         subdomain: d.subdomain,
         status: d.status as any,
         url: d.status === 'healthy' 
@@ -62,7 +59,7 @@ router.get(
           : undefined,
         provisioningStep: d.provisioningStep,
         errorMessage: d.errorMessage,
-        createdAt: (d.createdAt as Date).toISOString(), // Ensure Date type
+        createdAt: (d.createdAt as Date).toISOString(),
         lastHeartbeat: d.lastHeartbeat ? (d.lastHeartbeat as Date).toISOString() : undefined,
       }));
 
@@ -91,36 +88,113 @@ router.post(
   '/',
   authenticateToken,
   validateBody(createDeploymentSchema),
-  
   async (req: any, res, next) => {
     try {
       const userId = req.user!.id;
-      // EXTRACT Gemini/Google API Key
       const { name, model, openaiApiKey, anthropicApiKey, googleApiKey, telegramBotToken } = req.body;
-      let selectedModel = model;
 
       const user = await User.findById(userId);
       if (!user) {
-        res.status(404).json({ success: false, error: { code: 'USER_NOT_FOUND', message: 'User not found' } });
-        return;
+        return res.status(404).json({ 
+          success: false, 
+          error: { code: 'USER_NOT_FOUND', message: 'User not found' } 
+        });
       }
 
       const canCreate = await user.canCreateAgent();
       if (!canCreate.allowed) {
-        res.status(403).json({ success: false, error: { code: 'AGENT_LIMIT_REACHED', message: canCreate.reason } });
-        return;
+        return res.status(403).json({ 
+          success: false, 
+          error: { code: 'AGENT_LIMIT_REACHED', message: canCreate.reason } 
+        });
       }
 
       const existing = await Deployment.findOne({ subdomain: name.toLowerCase() });
       if (existing) {
-        res.status(409).json({ success: false, error: { code: 'SUBDOMAIN_TAKEN', message: 'Name taken' } });
-        return;
+        return res.status(409).json({ 
+          success: false, 
+          error: { code: 'SUBDOMAIN_TAKEN', message: 'Name taken' } 
+        });
       }
 
-      // Updated validation to include Google
+      // --- SMART MODEL DETECTION LOGIC START ---
+      let selectedModel = model;
+
+      // Model mapping for Google Gemini (use models from OpenClaw's pi-ai catalog)
+      const modelMapping: Record<string, string> = {
+        'google/gemini-1.5-flash': 'google/gemini-3-pro-preview',
+        'google/gemini-1.5-pro': 'google/gemini-3-pro-preview',
+        'google/gemini-2.0-flash-exp': 'google/gemini-3-pro-preview',
+        'google/gemini-flash': 'google/gemini-3-pro-preview',
+      };
+
+      // 1. Smart Fallback: If no model selected, pick based on available key
+      if (!selectedModel) {
+        if (googleApiKey) selectedModel = 'google/gemini-3-pro-preview';
+        else if (anthropicApiKey) selectedModel = 'anthropic/claude-3-5-sonnet';
+        else if (openaiApiKey) selectedModel = 'openai/gpt-4o';
+      }
+
+      // 2. Map deprecated/alias model names to actual catalog models
+      if (modelMapping[selectedModel]) {
+        const originalModel = selectedModel;
+        selectedModel = modelMapping[selectedModel];
+        logger.info('Mapped model to catalog version', {
+          from: originalModel,
+          to: selectedModel
+        });
+      }
+
+      // 3. Safety Check: Ensure the model matches the key provided
+      if (selectedModel?.startsWith('google') && !googleApiKey) {
+         return res.status(400).json({ 
+           success: false, 
+           error: { 
+             code: 'MISCONFIG', 
+             message: 'Selected Gemini but missing Google API Key' 
+           } 
+         });
+      }
+      if (selectedModel?.startsWith('anthropic') && !anthropicApiKey) {
+         return res.status(400).json({ 
+           success: false, 
+           error: { 
+             code: 'MISCONFIG', 
+             message: 'Selected Claude but missing Anthropic API Key' 
+           } 
+         });
+      }
+      if (selectedModel?.startsWith('openai') && !openaiApiKey) {
+         return res.status(400).json({ 
+           success: false, 
+           error: { 
+             code: 'MISCONFIG', 
+             message: 'Selected OpenAI but missing OpenAI API Key' 
+           } 
+         });
+      }
+
+      // 4. Final Fallback
+      if (!selectedModel) {
+         return res.status(400).json({ 
+           success: false, 
+           error: { 
+             code: 'MODEL_REQUIRED', 
+             message: 'Could not determine model from inputs' 
+           } 
+         });
+      }
+      // --- SMART MODEL DETECTION LOGIC END ---
+
+      // Global Key Check
       if (!openaiApiKey && !anthropicApiKey && !googleApiKey) {
-        res.status(400).json({ success: false, error: { code: 'API_KEY_REQUIRED', message: 'Provide an API key.' } });
-        return;
+        return res.status(400).json({ 
+          success: false, 
+          error: { 
+            code: 'API_KEY_REQUIRED', 
+            message: 'Provide at least one API key.' 
+          } 
+        });
       }
 
       const webUiToken = cryptoService.generateToken(32);
@@ -132,12 +206,13 @@ router.post(
         secrets: {
           openaiApiKey: openaiApiKey || undefined,
           anthropicApiKey: anthropicApiKey || undefined,
-          googleApiKey: googleApiKey || undefined, // ADDED
+          googleApiKey: googleApiKey || undefined,
           telegramBotToken: telegramBotToken || undefined,
           webUiToken,
         },
         config: {
-          model: model || 'google/gemini-1.5-flash', // Default to Gemini Flash
+          model: selectedModel, // Use the smart detected/corrected model
+          systemPrompt: 'You are a helpful AI assistant.'
         },
       });
 
@@ -149,13 +224,14 @@ router.post(
           await dockerService.spawnAgent(deployment, secrets);
         } catch (error) {
           logger.error('Async spawn failed', { error: (error as Error).message });
+          await deployment.transitionTo('error', { errorMessage: (error as Error).message });
         }
       });
 
       res.status(201).json({
         success: true,
         data: {
-          id: deployment._id.toString(), // FIX: ObjectId to String
+          id: deployment._id.toString(),
           subdomain: deployment.subdomain,
           status: deployment.status as any,
           createdAt: deployment.createdAt.toISOString(),
@@ -172,106 +248,45 @@ router.post(
 // GET /api/deployments/:id - Get deployment details
 // ============================================================================
 
-// backend/src/routes/deployments.ts
-
-router.post(
-  '/',
+router.get(
+  '/:id',
   authenticateToken,
-  validateBody(createDeploymentSchema),
+  validateParams(deploymentParamsSchema),
   async (req: any, res, next) => {
     try {
       const userId = req.user!.id;
-      // EXTRACT all keys including googleApiKey
-      const { name, model, openaiApiKey, anthropicApiKey, googleApiKey, telegramBotToken } = req.body;
+      const { id } = req.params;
 
-      const user = await User.findById(userId);
-      if (!user) {
-        return res.status(404).json({ success: false, error: { code: 'USER_NOT_FOUND', message: 'User not found' } });
-      }
-
-      const canCreate = await user.canCreateAgent();
-      if (!canCreate.allowed) {
-        return res.status(403).json({ success: false, error: { code: 'AGENT_LIMIT_REACHED', message: canCreate.reason } });
-      }
-
-      const existing = await Deployment.findOne({ subdomain: name.toLowerCase() });
-      if (existing) {
-        return res.status(409).json({ success: false, error: { code: 'SUBDOMAIN_TAKEN', message: 'Name taken' } });
-      }
-
-      // --- SMART MODEL DETECTION LOGIC START ---
-      let selectedModel = model;
-
-      // 1. Smart Fallback: If no model selected, pick based on available key
-      if (!selectedModel) {
-        if (googleApiKey) selectedModel = 'google/gemini-1.5-flash';
-        else if (anthropicApiKey) selectedModel = 'anthropic/claude-3-5-sonnet';
-        else if (openaiApiKey) selectedModel = 'openai/gpt-4o';
-      }
-
-      // 2. Safety Check: Ensure the model matches the key provided
-      if (selectedModel?.startsWith('google') && !googleApiKey) {
-         return res.status(400).json({ success: false, error: { code: 'MISCONFIG', message: 'Selected Gemini but missing Google API Key' } });
-      }
-      if (selectedModel?.startsWith('anthropic') && !anthropicApiKey) {
-         return res.status(400).json({ success: false, error: { code: 'MISCONFIG', message: 'Selected Claude but missing Anthropic API Key' } });
-      }
-      if (selectedModel?.startsWith('openai') && !openaiApiKey) {
-         return res.status(400).json({ success: false, error: { code: 'MISCONFIG', message: 'Selected OpenAI but missing OpenAI API Key' } });
-      }
-
-      // 3. Final Fallback (should be caught by validation, but safe to keep)
-      if (!selectedModel) {
-         return res.status(400).json({ success: false, error: { code: 'MODEL_REQUIRED', message: 'Could not determine model from inputs' } });
-      }
-      // --- SMART MODEL DETECTION LOGIC END ---
-
-      // Global Key Check
-      if (!openaiApiKey && !anthropicApiKey && !googleApiKey) {
-        return res.status(400).json({ success: false, error: { code: 'API_KEY_REQUIRED', message: 'Provide at least one API key.' } });
-      }
-
-      const webUiToken = cryptoService.generateToken(32);
-
-      const deployment = new Deployment({
+      const deployment = await Deployment.findOne({
+        _id: id,
         user: userId,
-        subdomain: name.toLowerCase(),
-        status: 'idle',
-        secrets: {
-          openaiApiKey: openaiApiKey || undefined,
-          anthropicApiKey: anthropicApiKey || undefined,
-          googleApiKey: googleApiKey || undefined, // <--- CRITICAL: Save Google Key
-          telegramBotToken: telegramBotToken || undefined,
-          webUiToken,
-        },
-        config: {
-          model: selectedModel, // <--- CRITICAL: Use the smart detected model
-          systemPrompt: 'You are a helpful AI assistant.'
-        },
       });
 
-      await deployment.save();
+      if (!deployment) {
+        res.status(404).json({
+          success: false,
+          error: {
+            code: 'DEPLOYMENT_NOT_FOUND',
+            message: 'Deployment not found',
+          },
+        } as ApiResponse);
+        return;
+      }
 
-      setImmediate(async () => {
-        try {
-          const secrets = await deployment.decryptSecrets();
-          await dockerService.spawnAgent(deployment, secrets);
-        } catch (error) {
-          logger.error('Async spawn failed', { error: (error as Error).message });
-          // If spawn fails immediately, mark as error so user isn't stuck in "starting"
-          await deployment.transitionTo('error', { errorMessage: (error as Error).message });
-        }
-      });
-
-      res.status(201).json({
+      res.json({
         success: true,
         data: {
           id: deployment._id.toString(),
           subdomain: deployment.subdomain,
           status: deployment.status as any,
+          url: deployment.status === 'healthy' ? deployment.getUrl() : undefined,
+          provisioningStep: deployment.provisioningStep,
+          errorMessage: deployment.errorMessage,
           createdAt: deployment.createdAt.toISOString(),
+          updatedAt: deployment.updatedAt.toISOString(),
+          lastHeartbeat: deployment.lastHeartbeat?.toISOString(),
         },
-      } as ApiResponse<DeploymentStatusResponse>);
+      } as ApiResponse);
 
     } catch (error) {
       next(error);
@@ -311,7 +326,7 @@ router.get(
       res.json({
         success: true,
         data: {
-          id: deployment._id.toString(), // FIX: Convert to string
+          id: deployment._id.toString(),
           status: deployment.status as any,
           provisioningStep: deployment.provisioningStep,
           errorMessage: deployment.errorMessage,
@@ -411,15 +426,11 @@ router.post(
           break;
 
         case 'remove':
-          // Stop and remove container
           if (deployment.containerId) {
             await dockerService.removeContainer(deployment);
           }
           
-          // Delete deployment record
           await Deployment.findByIdAndDelete(id);
-          
-          // Clear proxy cache
           proxyManager.clearCache(deployment.subdomain);
           
           res.json({
@@ -442,7 +453,7 @@ router.post(
       res.json({
         success: true,
         data: {
-          id: deployment._id.toString(), // FIX: Convert to string
+          id: deployment._id.toString(),
           status: deployment.status as any,
           message: `Action '${action}' initiated successfully`,
         },
@@ -557,10 +568,9 @@ router.get(
   }
 );
 
-// Helper for validateQuery (Placeholder implementation)
+// Helper for validateQuery
 function validateQuery(schema: any) {
   return (req: any, res: any, next: any) => {
-    // In production use proper validation like 'validateParams' but for query
     next();
   };
 }

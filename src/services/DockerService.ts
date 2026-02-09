@@ -143,7 +143,27 @@ export class DockerService {
     // --- 1. openclaw.json ---
     const configPath = path.join(configDir, 'openclaw.json');
     const gatewayToken = secrets.webUiToken || 'fallback-dev-token-xyz';
-    const modelStr = agentConfig.model || 'google/gemini-1.5-flash';
+    
+    // Use correct Google model names from OpenClaw's pi-ai catalog
+    // Available Google models: google/gemini-3-pro-preview, google/gemini-2.0-flash-thinking-exp
+    let modelStr = agentConfig.model || 'google/gemini-3-pro-preview';
+    
+    // Map common user inputs to actual catalog models
+    const modelMapping: Record<string, string> = {
+      'google/gemini-1.5-flash': 'google/gemini-3-pro-preview',
+      'google/gemini-1.5-pro': 'google/gemini-3-pro-preview',
+      'google/gemini-2.0-flash-exp': 'google/gemini-3-pro-preview',
+      'google/gemini-flash': 'google/gemini-3-pro-preview',
+    };
+    
+    if (modelMapping[modelStr]) {
+      const originalModel = modelStr;
+      modelStr = modelMapping[modelStr];
+      logger.info('Mapped model to catalog version', { 
+        from: originalModel, 
+        to: modelStr 
+      });
+    }
 
     const openClawConfig = {
       agents: {
