@@ -1,9 +1,3 @@
-/**
- * Error Handling Middleware
- * 
- * Centralized error handling for the application.
- */
-
 import { Request, Response, NextFunction } from 'express';
 import { logger } from '@utils/logger';
 import { 
@@ -11,11 +5,7 @@ import {
   EncryptionError, 
   DeploymentError,
   PortAllocationError 
-} from '@types/index';
-
-// ============================================================================
-// Custom Error Classes
-// ============================================================================
+} from '../types';
 
 export class AppError extends Error {
   constructor(
@@ -50,17 +40,12 @@ export class ConflictError extends AppError {
   }
 }
 
-// ============================================================================
-// Error Handler
-// ============================================================================
-
 export function errorHandler(
   err: Error,
   req: Request,
   res: Response,
   _next: NextFunction
 ): void {
-  // Log the error
   logger.error('Request error', {
     error: err.message,
     stack: err.stack,
@@ -69,7 +54,6 @@ export function errorHandler(
     userId: req.user?.id,
   });
 
-  // Handle specific error types
   if (err instanceof AppError) {
     res.status(err.statusCode).json({
       success: false,
@@ -126,7 +110,6 @@ export function errorHandler(
     return;
   }
 
-  // Mongoose validation error
   if (err.name === 'ValidationError') {
     const validationError = err as any;
     const messages = Object.values(validationError.errors).map(
@@ -144,7 +127,6 @@ export function errorHandler(
     return;
   }
 
-  // Mongoose duplicate key error
   if (err.name === 'MongoServerError' && (err as any).code === 11000) {
     const key = Object.keys((err as any).keyValue)[0];
     res.status(409).json({
@@ -157,7 +139,6 @@ export function errorHandler(
     return;
   }
 
-  // Mongoose cast error (invalid ObjectId)
   if (err.name === 'CastError') {
     res.status(400).json({
       success: false,
@@ -169,7 +150,6 @@ export function errorHandler(
     return;
   }
 
-  // JWT errors
   if (err.name === 'JsonWebTokenError') {
     res.status(401).json({
       success: false,
@@ -192,7 +172,6 @@ export function errorHandler(
     return;
   }
 
-  // Default: internal server error
   res.status(500).json({
     success: false,
     error: {
@@ -203,10 +182,6 @@ export function errorHandler(
     },
   });
 }
-
-// ============================================================================
-// 404 Handler
-// ============================================================================
 
 export function notFoundHandler(
   req: Request,

@@ -1,13 +1,13 @@
-import mongoose, { Schema, model } from 'mongoose';
+import mongoose, { Schema, model, Model } from 'mongoose';
 import { 
   IDeploymentDocument, 
   IDecryptedSecrets, 
   DeploymentStatus 
-} from '../types/index';
+} from '../types';
 import { cryptoService } from '@utils/crypto';
 import { logger } from '@utils/logger';
 
-const ENCRYPTED_FIELDS = ['openaiApiKey', 'anthropicApiKey', 'telegramBotToken', 'webUiToken'];
+const ENCRYPTED_FIELDS = ['openaiApiKey', 'anthropicApiKey', 'googleApiKey', 'telegramBotToken', 'webUiToken'];
 
 const DeploymentSchema = new Schema<IDeploymentDocument>(
   {
@@ -63,38 +63,25 @@ const DeploymentSchema = new Schema<IDeploymentDocument>(
   }
 );
 
-// --- Virtuals ---
-
 DeploymentSchema.virtual('url').get(function() {
   return this.getUrl();
 });
 
-// --- Helper Functions ---
-
-/**
- * Checks if a string matches the encryption format (iv:authTag:ciphertext)
- * where each part is a hex string.
- */
 function isEncryptedFormat(value: string): boolean {
   if (!value || typeof value !== 'string') return false;
   const parts = value.split(':');
-  // Must have exactly 3 parts, and all must be hex strings
   return parts.length === 3 && parts.every(p => /^[0-9a-fA-F]+$/.test(p));
 }
-
-// --- Methods ---
 
 DeploymentSchema.methods.decryptSecrets = async function(): Promise<IDecryptedSecrets> {
   const decrypted: IDecryptedSecrets = { webUiToken: '' };
   
-  // Helper to safely decrypt a field
   const safeDecrypt = (field: string, value?: string) => {
     if (!value) return undefined;
     
-    // Safety check: If somehow we have plaintext that looks like token in DB, don't crash
     if (!isEncryptedFormat(value)) {
         logger.warn(`Detecting plaintext secret for ${field} (Fixing automatically on next save)`, { id: this._id });
-        return value; // Return as-is if it's not encrypted
+        return value; 
     }
 
     try {
@@ -110,23 +97,20 @@ DeploymentSchema.methods.decryptSecrets = async function(): Promise<IDecryptedSe
     if (this.secrets.openaiApiKey) decrypted.openaiApiKey = safeDecrypt('openaiApiKey', this.secrets.openaiApiKey);
     if (this.secrets.anthropicApiKey) decrypted.anthropicApiKey = safeDecrypt('anthropicApiKey', this.secrets.anthropicApiKey);
     if (this.secrets.telegramBotToken) decrypted.telegramBotToken = safeDecrypt('telegramBotToken', this.secrets.telegramBotToken);
+    if (this.secrets.googleApiKey) decrypted.googleApiKey = safeDecrypt('googleApiKey', this.secrets.googleApiKey);
+
   } catch (error) {
-    // If decryption fails critically, we can't spawn the agent
     throw new Error(`Decryption failed: ${(error as Error).message}`);
   }
   return decrypted;
 };
 
-// --- Middleware ---
-
 DeploymentSchema.pre('save', async function(next) {
   if (!this.isModified('secrets')) return next();
   try {
-    const secrets = this.secrets as Record<string, string | undefined>;
+    const secrets: any = this.secrets;
     for (const field of ENCRYPTED_FIELDS) {
       const value = secrets[field];
-      // FIX: Use isEncryptedFormat() instead of just checking for ':'
-      // This ensures Telegram tokens (which contain ':') get encrypted correctly
       if (value && !isEncryptedFormat(value)) {
         secrets[field] = cryptoService.encrypt(value);
       }
@@ -134,8 +118,6 @@ DeploymentSchema.pre('save', async function(next) {
     next();
   } catch (err) { next(err as Error); }
 });
-
-// --- State Machine ---
 
 const VALID_STATE_TRANSITIONS: Record<DeploymentStatus, DeploymentStatus[]> = {
   idle: ['idle', 'configuring', 'provisioning', 'error'],
@@ -156,7 +138,9 @@ DeploymentSchema.methods.transitionTo = async function(
   const validTransitions = VALID_STATE_TRANSITIONS[currentStatus];
   
   if (!validTransitions || !validTransitions.includes(newStatus)) {
-    throw new Error(`Invalid state transition from ${currentStatus} to ${newStatus}`);
+    if (newStatus !== 'error' && newStatus !== 'idle') {
+        throw new Error(`Invalid state transition from ${currentStatus} to ${newStatus}`);
+    }
   }
 
   this.status = newStatus;
@@ -171,8 +155,6 @@ DeploymentSchema.methods.transitionTo = async function(
 
   await this.save();
 };
-
-// --- URL Generation ---
 
 DeploymentSchema.methods.getUrl = function(): string {
   const domain = process.env.DOMAIN || 'localhost';
@@ -191,9 +173,14 @@ DeploymentSchema.methods.getAutoLoginUrl = async function(): Promise<string> {
   return `${baseUrl}?token=${secrets.webUiToken}`;
 };
 
+// Add static method
+interface IDeploymentModel extends Model<IDeploymentDocument> {
+  findBySubdomain(subdomain: string): Promise<IDeploymentDocument | null>;
+}
+
 DeploymentSchema.statics.findBySubdomain = function(subdomain: string) {
   return this.findOne({ subdomain: subdomain.toLowerCase() });
 };
 
-export const Deployment = model<IDeploymentDocument>('Deployment', DeploymentSchema);
+export const Deployment = model<IDeploymentDocument, IDeploymentModel>('Deployment', DeploymentSchema);
 export default Deployment;

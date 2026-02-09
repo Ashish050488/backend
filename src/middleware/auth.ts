@@ -1,18 +1,7 @@
-/**
- * Authentication Middleware
- * 
- * JWT-based authentication for API endpoints.
- */
-
 import { Request, Response, NextFunction } from 'express';
 import jwt from 'jsonwebtoken';
 import { config } from '@config/index';
 import { logger } from '@utils/logger';
-import { User } from '@models/User';
-
-// ============================================================================
-// Types
-// ============================================================================
 
 declare global {
   namespace Express {
@@ -32,20 +21,12 @@ interface JwtPayload {
   tier: string;
 }
 
-// ============================================================================
-// Authentication Middleware
-// ============================================================================
-
-/**
- * Verify JWT token and attach user to request
- */
 export async function authenticateToken(
   req: Request,
   res: Response,
   next: NextFunction
 ): Promise<void> {
   try {
-    // Get token from header
     const authHeader = req.headers.authorization;
     const token = authHeader?.startsWith('Bearer ') 
       ? authHeader.substring(7) 
@@ -62,10 +43,8 @@ export async function authenticateToken(
       return;
     }
 
-    // Verify token
     const decoded = jwt.verify(token, config.jwt.secret) as JwtPayload;
 
-    // Attach user to request
     req.user = {
       id: decoded.userId,
       email: decoded.email,
@@ -110,9 +89,6 @@ export async function authenticateToken(
   }
 }
 
-/**
- * Optional authentication - attaches user if token valid, but doesn't require it
- */
 export async function optionalAuth(
   req: Request,
   res: Response,
@@ -135,14 +111,10 @@ export async function optionalAuth(
 
     next();
   } catch {
-    // Ignore errors for optional auth
     next();
   }
 }
 
-/**
- * Generate JWT token for user
- */
 export function generateToken(user: {
   _id: string;
   email: string;
@@ -150,7 +122,7 @@ export function generateToken(user: {
 }): string {
   return jwt.sign(
     {
-      userId: user._id.toString(),
+      userId: user._id,
       email: user.email,
       tier: user.tier,
     },
@@ -159,9 +131,6 @@ export function generateToken(user: {
   );
 }
 
-/**
- * Require specific tier for access
- */
 export function requireTier(...allowedTiers: string[]) {
   return (req: Request, res: Response, next: NextFunction): void => {
     if (!req.user) {

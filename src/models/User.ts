@@ -1,29 +1,20 @@
-import mongoose, { Schema, model } from 'mongoose';
+import mongoose, { Schema, model, Model } from 'mongoose';
 import bcrypt from 'bcryptjs';
-// FIX: Use relative import to avoid alias resolution issues in some environments
 import { 
   IUser, 
   IUserDocument, 
   SubscriptionStatus, 
   UserTier 
-} from '../types/index';
-
-// ============================================================================
-// Constants
-// ============================================================================
+} from '../types';
 
 const SALT_ROUNDS = 12;
 
-// Subscription tier configuration
 export const TIER_CONFIG: Record<string, { maxAgents: number; priority: number }> = {
-  free: { maxAgents: 0, priority: 0 },       // START HERE: No cost, no agents
-  hobby: { maxAgents: 1, priority: 1 },      // Paid: 1 Agent
-  pro: { maxAgents: 5, priority: 2 },        // Paid: 5 Agents
-  enterprise: { maxAgents: 20, priority: 3 }, // Custom
+  free: { maxAgents: 0, priority: 0 },
+  hobby: { maxAgents: 1, priority: 1 },
+  pro: { maxAgents: 5, priority: 2 },
+  enterprise: { maxAgents: 20, priority: 3 },
 };
-// ============================================================================
-// User Schema
-// ============================================================================
 
 const UserSchema = new Schema<IUserDocument>(
   {
@@ -72,14 +63,14 @@ const UserSchema = new Schema<IUserDocument>(
   {
     timestamps: true,
     toJSON: {
-      transform: (_doc, ret: any) => { // FIX: Cast ret to any to allow delete
+      transform: (_doc, ret: any) => {
         delete ret.passwordHash;
         delete ret.__v;
         return ret;
       },
     },
     toObject: {
-      transform: (_doc, ret: any) => { // FIX: Cast ret to any to allow delete
+      transform: (_doc, ret: any) => {
         delete ret.passwordHash;
         delete ret.__v;
         return ret;
@@ -88,23 +79,16 @@ const UserSchema = new Schema<IUserDocument>(
   }
 );
 
-// ============================================================================
-// Indexes
-// ============================================================================
-
 UserSchema.index({ subscriptionStatus: 1, tier: 1 });
-
-// ============================================================================
-// Instance Methods
-// ============================================================================
 
 UserSchema.methods.comparePassword = async function(password: string): Promise<boolean> {
   return bcrypt.compare(password, this.passwordHash);
 };
 
-// ============================================================================
-// Static Methods
-// ============================================================================
+interface IUserModel extends Model<IUserDocument> {
+  hashPassword(password: string): Promise<string>;
+  findByEmail(email: string): Promise<IUserDocument | null>;
+}
 
 UserSchema.statics.hashPassword = async function(password: string): Promise<string> {
   return bcrypt.hash(password, SALT_ROUNDS);
@@ -114,12 +98,7 @@ UserSchema.statics.findByEmail = function(email: string) {
   return this.findOne({ email: email.toLowerCase() });
 };
 
-// ============================================================================
-// Business Logic Methods
-// ============================================================================
-
 UserSchema.methods.canCreateAgent = async function(): Promise<{ allowed: boolean; reason?: string }> {
-  // Explicitly cast to string to index TIER_CONFIG safely
   const tier = this.tier || 'free';
   const config = TIER_CONFIG[tier];
   
@@ -129,7 +108,6 @@ UserSchema.methods.canCreateAgent = async function(): Promise<{ allowed: boolean
 
   const { maxAgents } = config;
 
-  // BLOCK FREE USERS IMMEDIATELY
   if (maxAgents === 0) {
     return { 
       allowed: false, 
@@ -137,7 +115,6 @@ UserSchema.methods.canCreateAgent = async function(): Promise<{ allowed: boolean
     };
   }
   
-  // Count current deployments
   const Deployment = mongoose.model('Deployment');
   const currentCount = await Deployment.countDocuments({
     user: this._id,
@@ -166,10 +143,6 @@ UserSchema.methods.updateSubscription = async function(
   await this.save();
 };
 
-// ============================================================================
-// Pre-save Middleware
-// ============================================================================
-
 UserSchema.pre('save', async function(next) {
   if (this.isModified('tier')) {
     const tier = this.tier as UserTier;
@@ -180,10 +153,6 @@ UserSchema.pre('save', async function(next) {
   next();
 });
 
-// ============================================================================
-// Model Export
-// ============================================================================
-
-export const User = model<IUserDocument>('User', UserSchema);
+export const User = model<IUserDocument, IUserModel>('User', UserSchema);
 
 export default User;

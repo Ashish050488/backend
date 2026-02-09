@@ -1,22 +1,12 @@
-/**
- * Authentication Routes
- * 
- * User registration, login, and profile management.
- */
-
 import { Router } from 'express';
 import bcrypt from 'bcryptjs';
 import { User } from '@models/User';
 import { generateToken, authenticateToken } from '@middleware/auth';
 import { validateBody, registerSchema, loginSchema } from '@middleware/validate';
 import { logger } from '@utils/logger';
-import { ApiResponse } from '@types/index';
+import { ApiResponse } from '../types';
 
 const router = Router();
-
-// ============================================================================
-// POST /api/auth/register - Register new user
-// ============================================================================
 
 router.post(
   '/register',
@@ -25,7 +15,6 @@ router.post(
     try {
       const { email, password } = req.body;
 
-      // Check if user already exists
       const existingUser = await User.findByEmail(email);
       if (existingUser) {
         res.status(409).json({
@@ -38,10 +27,8 @@ router.post(
         return;
       }
 
-      // Hash password
       const passwordHash = await bcrypt.hash(password, 12);
 
-      // Create user
       const user = new User({
         email,
         passwordHash,
@@ -49,8 +36,11 @@ router.post(
 
       await user.save();
 
-      // Generate token
-      const token = generateToken(user);
+      const token = generateToken({
+        _id: user._id.toString(),
+        email: user.email,
+        tier: user.tier,
+      });
 
       logger.info('User registered', { userId: user._id, email });
 
@@ -58,7 +48,7 @@ router.post(
         success: true,
         data: {
           user: {
-            id: user._id,
+            id: user._id.toString(),
             email: user.email,
             tier: user.tier,
             subscriptionStatus: user.subscriptionStatus,
@@ -74,10 +64,6 @@ router.post(
   }
 );
 
-// ============================================================================
-// POST /api/auth/login - Login user
-// ============================================================================
-
 router.post(
   '/login',
   validateBody(loginSchema),
@@ -85,7 +71,6 @@ router.post(
     try {
       const { email, password } = req.body;
 
-      // Find user
       const user = await User.findByEmail(email);
       if (!user) {
         res.status(401).json({
@@ -98,7 +83,6 @@ router.post(
         return;
       }
 
-      // Verify password
       const isValid = await bcrypt.compare(password, user.passwordHash);
       if (!isValid) {
         res.status(401).json({
@@ -111,8 +95,11 @@ router.post(
         return;
       }
 
-      // Generate token
-      const token = generateToken(user);
+      const token = generateToken({
+        _id: user._id.toString(),
+        email: user.email,
+        tier: user.tier,
+      });
 
       logger.info('User logged in', { userId: user._id, email });
 
@@ -120,7 +107,7 @@ router.post(
         success: true,
         data: {
           user: {
-            id: user._id,
+            id: user._id.toString(),
             email: user.email,
             tier: user.tier,
             subscriptionStatus: user.subscriptionStatus,
@@ -135,10 +122,6 @@ router.post(
     }
   }
 );
-
-// ============================================================================
-// GET /api/auth/me - Get current user profile
-// ============================================================================
 
 router.get(
   '/me',
@@ -161,7 +144,7 @@ router.get(
       res.json({
         success: true,
         data: {
-          id: user._id,
+          id: user._id.toString(),
           email: user.email,
           tier: user.tier,
           subscriptionStatus: user.subscriptionStatus,
@@ -175,10 +158,6 @@ router.get(
     }
   }
 );
-
-// ============================================================================
-// POST /api/auth/refresh - Refresh access token
-// ============================================================================
 
 router.post(
   '/refresh',
@@ -198,8 +177,11 @@ router.post(
         return;
       }
 
-      // Generate new token
-      const token = generateToken(user);
+      const token = generateToken({
+        _id: user._id.toString(),
+        email: user.email,
+        tier: user.tier,
+      });
 
       res.json({
         success: true,

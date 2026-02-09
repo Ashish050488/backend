@@ -11,7 +11,7 @@ export interface IUser {
   _id: Types.ObjectId;
   email: string;
   passwordHash: string;
-razorpayCustomerId?: string;
+  razorpayCustomerId?: string;
   subscriptionStatus: SubscriptionStatus;
   tier: UserTier;
   maxAgents: number;
@@ -25,7 +25,10 @@ export interface IUserDocument extends IUser, Document {
   updateSubscription(status: SubscriptionStatus, tier?: UserTier): Promise<void>;
 }
 
-// ... (Keep the rest of your Deployment/Docker types below as they were)
+// ============================================================================
+// Deployment Types
+// ============================================================================
+
 export type DeploymentStatus = 
   | 'idle' 
   | 'configuring' 
@@ -39,8 +42,9 @@ export type DeploymentStatus =
 export interface IDeploymentSecrets {
   openaiApiKey?: string;
   anthropicApiKey?: string;
+  googleApiKey?: string; // ADDED: Explicitly define googleApiKey
+  telegramBotToken?: string;
   webUiToken: string;
-  [key: string]: string | undefined;
 }
 
 export interface IDeployment {
@@ -69,9 +73,14 @@ export interface IDeploymentDocument extends IDeployment, Document {
 export interface IDecryptedSecrets {
   openaiApiKey?: string;
   anthropicApiKey?: string;
+  googleApiKey?: string; // ADDED: Explicitly define googleApiKey
+  telegramBotToken?: string;
   webUiToken: string;
-  [key: string]: string | undefined;
 }
+
+// ============================================================================
+// Docker Types
+// ============================================================================
 
 export interface ContainerConfig {
   Image: string;
@@ -111,6 +120,10 @@ export interface OpenClawConfig {
   };
 }
 
+// ============================================================================
+// API Response Types
+// ============================================================================
+
 export interface ApiResponse<T = unknown> {
   success: boolean;
   data?: T;
@@ -123,6 +136,7 @@ export interface ApiResponse<T = unknown> {
     page?: number;
     limit?: number;
     total?: number;
+    pages?: number;
   };
 }
 
@@ -136,6 +150,25 @@ export interface DeploymentStatusResponse {
   createdAt: string;
   lastHeartbeat?: string;
 }
+
+// ============================================================================
+// Payment Types
+// ============================================================================
+
+export interface PaymentOrderRequest {
+  plan: 'hobby' | 'pro';
+}
+
+export interface PaymentVerifyRequest {
+  razorpayOrderId: string;
+  razorpayPaymentId: string;
+  signature: string;
+  plan: 'hobby' | 'pro';
+}
+
+// ============================================================================
+// Error Classes
+// ============================================================================
 
 export class TamperedDataError extends Error {
   constructor(message: string = 'Data integrity check failed') {
@@ -163,17 +196,4 @@ export class PortAllocationError extends Error {
     super(message);
     this.name = 'PortAllocationError';
   }
-}
-
-
-
-export interface PaymentOrderRequest {
-  plan: 'hobby' | 'pro';
-}
-
-export interface PaymentVerifyRequest {
-  razorpayOrderId: string;
-  razorpayPaymentId: string;
-  signature: string;
-  plan: 'hobby' | 'pro';
 }

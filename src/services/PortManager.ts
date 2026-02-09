@@ -1,25 +1,10 @@
-/**
- * PortManager Service - Thread-Safe Port Allocation
- * 
- * Manages the allocation of host ports for Docker containers.
- * Uses database-level atomic operations to prevent race conditions.
- */
-
 import { Deployment } from '@models/Deployment';
 import { config } from '@config/index';
 import { logger } from '@utils/logger';
-import { PortAllocationError } from '@types/index';
-
-// ============================================================================
-// Constants
-// ============================================================================
+import { PortAllocationError } from '../types';
 
 const MIN_PORT = config.ports.min;
 const MAX_PORT = config.ports.max;
-
-// ============================================================================
-// PortManager Class
-// ============================================================================
 
 export class PortManager {
   private static instance: PortManager;
@@ -27,9 +12,6 @@ export class PortManager {
 
   private constructor() {}
 
-  /**
-   * Get singleton instance
-   */
   public static getInstance(): PortManager {
     if (!PortManager.instance) {
       PortManager.instance = new PortManager();
@@ -37,34 +19,16 @@ export class PortManager {
     return PortManager.instance;
   }
 
-  // ==========================================================================
-  // Public Methods
-  // ==========================================================================
-
-  /**
-   * Find and allocate an available port
-   * 
-   * This method implements a thread-safe port allocation strategy:
-   * 1. Query all currently used ports from the database
-   * 2. Find the first available port in the range
-   * 3. Use atomic database operation to reserve the port
-   * 
-   * @returns Promise resolving to the allocated port number
-   * @throws PortAllocationError if no ports are available
-   */
   async allocatePort(): Promise<number> {
     logger.debug('Starting port allocation...');
 
     try {
-      // Get all currently used ports from database
       const usedPorts = await this.getUsedPorts();
       
-      // Add in-flight reservations to used ports
       this.inFlightReservations.forEach(port => usedPorts.add(port));
 
       logger.debug(`Found ${usedPorts.size} used/reserved ports`);
 
-      // Find first available port
       const availablePort = this.findAvailablePort(usedPorts);
 
       if (!availablePort) {
@@ -73,17 +37,13 @@ export class PortManager {
         );
       }
 
-      // Reserve the port in-memory first (short-term lock)
       this.inFlightReservations.add(availablePort);
 
       try {
-        // The actual reservation happens when the Deployment document is saved
-        // with the atomic findOneAndUpdate or unique index on internalPort
         logger.info(`Port ${availablePort} reserved successfully`);
         
         return availablePort;
       } catch (error) {
-        // Release in-memory reservation on failure
         this.inFlightReservations.delete(availablePort);
         throw error;
       }
@@ -97,22 +57,11 @@ export class PortManager {
     }
   }
 
-  /**
-   * Release a port back to the pool
-   * 
-   * @param port - The port to release
-   */
   releasePort(port: number): void {
     this.inFlightReservations.delete(port);
     logger.debug(`Port ${port} released`);
   }
 
-  /**
-   * Check if a port is available
-   * 
-   * @param port - The port to check
-   * @returns Promise resolving to true if available
-   */
   async isPortAvailable(port: number): Promise<boolean> {
     if (port < MIN_PORT || port > MAX_PORT) {
       return false;
@@ -126,9 +75,6 @@ export class PortManager {
     return !usedPorts.has(port);
   }
 
-  /**
-   * Get port allocation statistics
-   */
   async getStats(): Promise<{
     total: number;
     used: number;
@@ -148,15 +94,6 @@ export class PortManager {
     };
   }
 
-  // ==========================================================================
-  // Private Methods
-  // ==========================================================================
-
-  /**
-   * Get all currently used ports from the database
-   * 
-   * Queries deployments that are NOT in terminal states (stopped, error)
-   */
   private async getUsedPorts(): Promise<Set<number>> {
     const deployments = await Deployment.find({
       status: { $nin: ['stopped', 'error', 'idle'] },
@@ -174,12 +111,6 @@ export class PortManager {
     return ports;
   }
 
-  /**
-   * Find the first available port in the range
-   * 
-   * Uses a simple linear scan which is efficient for <10k agents.
-   * For higher scale, consider using a free-list data structure.
-   */
   private findAvailablePort(usedPorts: Set<number>): number | null {
     for (let port = MIN_PORT; port <= MAX_PORT; port++) {
       if (!usedPorts.has(port)) {
@@ -189,16 +120,6 @@ export class PortManager {
     return null;
   }
 
-  /**
-   * Atomically reserve a port using MongoDB
-   * 
-   * This method attempts to update a deployment document with the port,
-   * relying on MongoDB's unique index on internalPort to prevent collisions.
-   * 
-   * @param deploymentId - The deployment ID
-   * @param port - The port to reserve
-   * @returns Promise resolving to true if reservation succeeded
-   */
   async atomicReservePort(
     deploymentId: string, 
     port: number
@@ -226,7 +147,6 @@ export class PortManager {
         return false;
       }
 
-      // Remove from in-flight reservations
       this.inFlightReservations.delete(port);
       
       logger.debug('Atomic port reservation successful', {
@@ -236,10 +156,8 @@ export class PortManager {
 
       return true;
     } catch (error) {
-      // Release in-memory reservation on failure
       this.inFlightReservations.delete(port);
       
-      // Check for duplicate key error (port already in use)
       const errorMessage = (error as Error).message;
       if (errorMessage.includes('E11000') || errorMessage.includes('duplicate')) {
         logger.warn('Port collision detected, retrying...', { port });
@@ -250,10 +168,6 @@ export class PortManager {
     }
   }
 }
-
-// ============================================================================
-// Singleton Export
-// ============================================================================
 
 export const portManager = PortManager.getInstance();
 
