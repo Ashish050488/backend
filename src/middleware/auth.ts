@@ -120,16 +120,19 @@ export function generateToken(user: {
   email: string;
   tier: string;
 }): string {
-  return jwt.sign(
-    {
-      userId: user._id,
-      email: user.email,
-      tier: user.tier,
-    },
-    config.jwt.secret,
-    { expiresIn: config.jwt.expiresIn }
-  );
+  const payload = {
+    userId: user._id,
+    email: user.email,
+    tier: user.tier,
+  };
+
+  const options: jwt.SignOptions = {
+    expiresIn: config.jwt.expiresIn as jwt.SignOptions['expiresIn'],
+  };
+
+  return jwt.sign(payload, config.jwt.secret, options);
 }
+
 
 export function requireTier(...allowedTiers: string[]) {
   return (req: Request, res: Response, next: NextFunction): void => {

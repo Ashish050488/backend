@@ -1,11 +1,12 @@
-import cron, { ScheduledTask } from 'node-cron'; // 1. Added Named Import for the type
+import cron, { ScheduledTask } from 'node-cron';
 import { Deployment } from '@models/Deployment';
-import { dockerService } from './DockerService';
+import { containerManager } from '@services/docker/ContainerManager';
 import { logger } from '@utils/logger';
+import Docker from 'dockerode';
 
 export class ReaperService {
   private isRunning = false;
-  private task: ScheduledTask | null = null; // 2. Updated type usage (removed 'cron.' prefix)
+  private task: ScheduledTask | null = null;
 
   start() {
     // Run every 5 minutes instead of every minute (reduces load)
@@ -43,11 +44,11 @@ export class ReaperService {
     try {
       // 1. Get all containers with timeout
       const activeContainers = await Promise.race([
-        dockerService.listContainers(),
+        containerManager.listManagedContainers(),
         this.timeout(10000, 'Docker list containers timed out')
       ]);
 
-      const activeContainerIds = new Set(activeContainers.map(c => c.Id));
+      const activeContainerIds = new Set(activeContainers.map((c: Docker.ContainerInfo) => c.Id));
 
       // 2. Get deployments that should be running (with lean query for performance)
       const supposedActiveDeployments = await Deployment.find({

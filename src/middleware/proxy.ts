@@ -7,9 +7,11 @@
 
 import httpProxy from 'http-proxy';
 import { Request, Response, NextFunction } from 'express';
+import { IncomingMessage } from 'http';
 import { Deployment } from '@models/Deployment';
 import { logger } from '@utils/logger';
 import { config } from '@config/index';
+import { Socket } from 'net';
 
 // ============================================================================
 // Constants
@@ -119,8 +121,8 @@ class ProxyManager {
    * Must be attached to the HTTP server's 'upgrade' event
    */
   handleUpgrade = async (
-    request: httpProxy.ProxyReqArgs['req'],
-    socket: NodeJS.Socket,
+    request: IncomingMessage,
+    socket: Socket,
     head: Buffer
   ): Promise<void> => {
     const host = request.headers.host || '';

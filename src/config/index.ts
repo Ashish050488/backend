@@ -5,6 +5,7 @@
 import dotenv from 'dotenv';
 import path from 'path';
 import os from 'os';
+import fs from 'fs';
 
 // Load environment variables
 dotenv.config({ path: path.resolve(__dirname, '../../.env') });
@@ -31,11 +32,28 @@ function getIntEnv(key: string, defaultValue: number): number {
   return parsed;
 }
 
-// Determine a safe data path for Docker
+// Platform & environment detection
 const isWindows = os.platform() === 'win32';
-const defaultDataPath = isWindows 
-  ? 'C:\\simpleclaw-data' // Safe path for Windows Dev
-  : '/opt/saas/data';     // Standard path for Linux Prod
+const isRunningInDocker =
+  process.env.RUNNING_IN_DOCKER === 'true' ||
+  fs.existsSync('/.dockerenv') ||
+  fs.existsSync('/run/.containerenv');
+
+// Safe data path defaults
+const defaultDataPath = isWindows
+  ? 'C:\\simpleclaw-data'
+  : '/opt/saas/data';
+
+// Docker socket defaults:
+// - Windows host: TCP is easiest (you already verified 2375 works)
+// - Linux host: unix socket
+// - If backend is itself running inside a container: 127.0.0.1 points to *that container*,
+//   so use host.docker.internal for TCP-to-host (works in Docker Desktop).
+const defaultDockerSocket = (() => {
+  if (isWindows) return 'http://127.0.0.1:2375';
+  if (isRunningInDocker) return 'http://host.docker.internal:2375';
+  return 'unix:///var/run/docker.sock';
+})();
 
 export const config = {
   // Server
@@ -74,11 +92,14 @@ export const config = {
 
   // Docker
   docker: {
-    socketPath: getEnv('DOCKER_SOCKET', '/var/run/docker.sock'),
+    // IMPORTANT: default now matches your OS instead of hardcoding Linux sock
+    socketPath: getEnv('DOCKER_SOCKET', defaultDockerSocket),
+
+    // IMPORTANT: keep GHCR as the default (matches your manual docker pull)
     agentImage: getEnv('AGENT_IMAGE', 'ghcr.io/openclaw/openclaw:latest'),
-    // USE THE SAFE PATH LOGIC
+
     dataPath: getEnv('DATA_PATH', defaultDataPath),
-    containerPrefix: 'simpleclaw-agent-',
+    containerPrefix: getEnv('CONTAINER_PREFIX', 'simpleclaw-agent-'),
   },
 
   // Port Allocation
@@ -89,24 +110,25 @@ export const config = {
 
   // Agent Configuration
   agent: {
-    defaultModel: 'anthropic/claude-3-5-sonnet',
-    internalPort: 18789,
-    // UPDATE THESE TWO LINES:
-    memoryLimit: 2 * 1024 * 1024 * 1024, // 2GB RAM
-    cpuLimit: 2000000000, // 2 CPUs (optional, helps with startup speed)
-    maxRestarts: 3,
-    healthCheckTimeout: 120000, // Increase to 2 minutes for slower startups
-    healthCheckInterval: 2000,
+    defaultModel: getEnv('DEFAULT_MODEL', 'anthropic/claude-3-5-sonnet'),
+    internalPort: getIntEnv('AGENT_INTERNAL_PORT', 18789),
+
+    memoryLimit: getIntEnv('AGENT_MEMORY_LIMIT', 2 * 1024 * 1024 * 1024), // 2GB
+    cpuLimit: getIntEnv('AGENT_CPU_NANO', 2_000_000_000), // 2 CPUs in NanoCpus
+
+    maxRestarts: getIntEnv('AGENT_MAX_RESTARTS', 3),
+    healthCheckTimeout: getIntEnv('HEALTH_CHECK_TIMEOUT', 120000),
+    healthCheckInterval: getIntEnv('HEALTH_CHECK_INTERVAL', 2000),
   },
 
   // Payments (Razorpay)
   payments: {
-    razorpayKeyId: process.env.RAZORPAY_KEY_ID || '', // Optional to prevent crash if missing
+    razorpayKeyId: process.env.RAZORPAY_KEY_ID || '',
     razorpayKeySecret: process.env.RAZORPAY_KEY_SECRET || '',
     plans: {
       hobby: { amount: 4900, currency: 'INR' },
       pro: { amount: 9900, currency: 'INR' },
-    }
+    },
   },
 
   // Logging
